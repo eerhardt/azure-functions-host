@@ -30,6 +30,7 @@ namespace Microsoft.Azure.WebJobs.Script.Description
 
         private readonly List<string> _probingPaths = new List<string>();
         private readonly IDictionary<string, string> _depsAssemblies;
+        private readonly IDictionary<string, string> _nativeLibraries;
 
         public FunctionAssemblyLoadContext(string basePath)
         {
@@ -38,7 +39,7 @@ namespace Microsoft.Azure.WebJobs.Script.Description
                 throw new ArgumentNullException(nameof(basePath));
             }
 
-            _depsAssemblies = InitializeDeps(basePath);
+            (_depsAssemblies, _nativeLibraries) = InitializeDeps(basePath);
 
             _probingPaths.Add(basePath);
         }
@@ -50,7 +51,7 @@ namespace Microsoft.Azure.WebJobs.Script.Description
             _defaultContext = new Lazy<FunctionAssemblyLoadContext>(CreateSharedContext, true);
         }
 
-        internal static IDictionary<string, string> InitializeDeps(string basePath)
+        internal static (IDictionary<string, string> depsAssemblies, IDictionary<string, string> nativeLibraries) InitializeDeps(string basePath)
         {
             string depsFilePath = Path.Combine(basePath, DotNetConstants.FunctionsDepsFileName);
 
@@ -64,8 +65,14 @@ namespace Microsoft.Azure.WebJobs.Script.Description
                     using (Stream file = File.OpenRead(depsFilePath))
                     {
                         var depsContext = reader.Read(file);
-                        return depsContext.RuntimeLibraries.SelectMany(l => SelectRuntimeAssemblyGroup(rids, l.RuntimeAssemblyGroups))
+                        var depsAssemblies = depsContext.RuntimeLibraries.SelectMany(l => SelectRuntimeAssemblyGroup(rids, l.RuntimeAssemblyGroups))
                             .ToDictionary(path => Path.GetFileNameWithoutExtension(path));
+
+                        // Note this difference here that nativeLibraries has the whole file name, including extension.
+                        var nativeLibraries = depsContext.RuntimeLibraries.SelectMany(l => SelectRuntimeAssemblyGroup(rids, l.NativeLibraryGroups))
+                            .ToDictionary(path => Path.GetFileName(path));
+
+                        return (depsAssemblies, nativeLibraries);
                     }
                 }
                 catch
@@ -73,7 +80,7 @@ namespace Microsoft.Azure.WebJobs.Script.Description
                 }
             }
 
-            return null;
+            return (null, null);
         }
 
         private static IEnumerable<string> SelectRuntimeAssemblyGroup(List<string> rids, IReadOnlyList<RuntimeAssetGroup> runtimeAssemblyGroups)
@@ -307,9 +314,23 @@ namespace Microsoft.Azure.WebJobs.Script.Description
 
             List<string> rids = DependencyHelper.GetRuntimeFallbacks();
 
-            return rids.Select(r => Path.Combine(runtimesPath, r, ridSubFolder, assetFileName))
+            string result = rids.Select(r => Path.Combine(runtimesPath, r, ridSubFolder, assetFileName))
                 .Union(_probingPaths)
                 .FirstOrDefault(p => File.Exists(p));
+
+            if (result == null && _nativeLibraries != null)
+            {
+                if (_nativeLibraries.TryGetValue(assetFileName, out string relativePath))
+                {
+                    string nativeLibraryFullPath = Path.Combine(basePath, relativePath);
+                    if (File.Exists(nativeLibraryFullPath))
+                    {
+                        result = nativeLibraryFullPath;
+                    }
+                }
+            }
+
+            return result;
         }
 
         internal string GetUnmanagedLibraryFileName(string unmanagedLibraryName)
